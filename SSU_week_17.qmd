@@ -1,0 +1,1213 @@
+---
+title: "SSU_week_17"
+format: html
+editor: visual
+---
+
+```{r}
+set.seed(123)
+```
+
+```{r}
+#| echo: false
+#| results: hide
+library(Hmisc)
+library(ggplot2)
+library(rms)
+library(mice)
+library(boot)
+library(MASS)
+library(pim)
+library(patchwork)
+library(ggpubr)
+library(DHARMa)
+```
+
+# Check New Analysis Data
+
+```{r}
+# new analysis data
+dt2 <- read.csv('analytic_data.csv')
+
+# transform data
+dt2$daooh30 <- as.numeric(dt2$daooh30)
+dt2$daoohr30 <- as.numeric(dt2$daoohr30)
+dt2$daooh90 <- as.numeric(dt2$daooh90)
+dt2$daoohr90 <- as.numeric(dt2$daoohr90)
+
+dt2$hosp6mo <- as.factor(dt2$hosp6mo)
+dt2$troponinilow2 <- as.factor(dt2$troponinilow2)
+```
+
+```{r}
+colnames(dt2)
+```
+
+```{r}
+# data summary
+table2 <- summaryM(daooh30+daooh90+daoohr30+daoohr90+hosp6mo+sbp+bun+troponinilow2+bnpval ~treatgroup,data = dt2)
+html(table2)
+
+sapply(dt2[,c('daooh30','daoohr30','daooh90','daoohr90')],sd, na.rm = TRUE)
+sapply(dt2[,c('daooh30','daoohr30','daooh90','daoohr90')],var, na.rm = TRUE)
+```
+
+-   There are some NA values in troponin and bnpval columns.
+
+```{r}
+# data distribution of daoohr30 and daoohr90
+p1 <- ggplot(data = dt2, mapping = aes(x = daoohr30))+
+  geom_histogram((aes(y = after_stat(count))))+
+  scale_x_continuous(breaks = seq(0, 30, by = 10)) +
+  labs(y = 'Frequency', x = 'DAOOH30')+
+  theme_bw()
+
+p2 <- ggplot(data = dt2, mapping = aes(x = daoohr90))+
+  geom_histogram((aes(y = after_stat(count))))+
+  scale_x_continuous(breaks = seq(0, 90, by = 15)) +
+  labs(y = NULL,x = 'DAOOH90')+
+  theme_bw()
+
+p1 + p2
+
+ggsave("hist.plot.png", plot = p1 + p2, width = 6, height = 4, dpi = 300)
+```
+
+# Multiple Imputation
+
+reference: https://library.virginia.edu/data/articles/getting-started-with-multiple-imputation-in-r https://www.rdocumentation.org/packages/mice/versions/3.17.0/topics/mice
+
+```{r}
+# remove subjects whose daoohr are all NA values
+dt2 <- dt2[!(is.na(dt2$daoohr30) & is.na(dt2$daoohr90)),]
+# leave out the id variable
+dt.im <- dt2[,c('hosp6mo','sbp','bun', 'troponinilow2','bnpval','treatgroup','daoohr30')]
+
+# inpute missing values 
+dt.imp <- mice(dt.im, m = 15, seed = 123) 
+```
+
+## check one complete dataset and use this for show the models
+
+```{r}
+df.comp1 <- complete(dt.imp, action = 1)  # extract first imputed dataset
+head(df.comp1)
+```
+
+## pool the estimates together
+
+```{r}
+dt.long <- mice::complete(dt.imp, action="long", include = TRUE)
+dt.long$daoohr30 <- dt2$daoohr30
+dt.long$ndaoohr30 <- 30-dt2$daoohr30
+dt.long$daoohr30.r <- ordered(dt2$daoohr30)
+dt.long.mids <- as.mids(dt.long)
+```
+
+## imputed dt2 dataset
+
+```{r}
+dt2$troponinilow2 <- df.comp1$troponinilow2
+dt2$bnpval <- df.comp1$bnpval
+colSums(is.na(dt2))
+head(dt2)
+```
+
+# T-test
+
+```{r}
+group <- factor(dt2$treatgroup, levels = c('SSU','Hospitalization'))
+t.result <- t.test(daoohr30~group,data = dt2)
+t.estimate <- t.result$estimate[1] - t.result$estimate[2]
+t.ci.lw <- t.result$conf.int[1]
+t.ci.up <- t.result$conf.int[2]
+t.pval <- t.result$p.value
+```
+
+# Wilcoxon test
+
+## Explore the arguments
+
+reference: https://search.r-project.org/R/refmans/stats/html/wilcox.test.html
+
+```{r}
+U.result <- wilcox.test(daoohr30~treatgroup,data = dt2)
+U.result
+
+# if set exact = TRUE, get the warning 'cannot compute exact p-value with ties'
+# if set exact = FALSE, the function use normal approximation for the distribution of U statistic
+```
+
+## Calculate the Probabilistic Index and 95% CI
+
+The change in previous result may due to the NA values.
+
+```{r}
+grp1 <- dt2$daoohr30[dt2$treatgroup == 'SSU']
+grp2 <- dt2$daoohr30[dt2$treatgroup == 'Hospitalization']
+U <- U.result$statistic
+n1 <- length(grp1)
+n2 <- length(grp2)
+
+# Probabilistic Index
+wmw.estimate <- U / (n1 * n2)
+wmw.p.val <- U.result$p.value
+cat("Probabilistic Index (PI):", wmw.estimate, "\n")
+# the probability that the daoohr30 of a random observation of the SSU group is larger or equal than that of a random observation of the Hospitalization  group
+# if H0 holds, the probabilistic index = 1/2.
+```
+
+```{r}
+# Bootstrap for Confidence Interval of PI
+set.seed(123)
+boot_pi <- replicate(1000, {
+  sample1 <- sample(grp1, replace = TRUE)
+  sample2 <- sample(grp2, replace = TRUE)
+  U_boot <- wilcox.test(sample1,sample2)$statistic # still use correction here
+  U_boot / (length(sample1) * length(sample2))
+})
+
+# 95% CI
+CI <- quantile(boot_pi, probs = c(0.025, 0.975))
+cat("95% Confidence Interval for PI:", CI, "\n")
+
+wmw.ci.lw <- CI[1]
+wmw.ci.up <- CI[2]
+```
+
+The reason for different result if change the position of sample 1 and sample 2: the function is comparing the the distribution of x(position 1) to the distribution of y(position 2).
+
+```{r}
+0.5 - 0.5128873
+0.5 - 0.4840982 
+```
+
+```{r}
+0.5 - 0.6817386
+0.5 - 0.3147176
+```
+
+```{r}
+# same p-values, different W statistic
+wilcox.test(grp1,grp2)
+wilcox.test(grp2,grp1)
+```
+
+# Modeling
+
+## Linear Regression
+
+```{r}
+# model construction
+model.linear <- lm(daoohr30 ~ hosp6mo+sbp+bun+troponinilow2+bnpval+treatgroup, data = dt2)
+summary(model.linear)
+```
+
+-   sbp and bun show significant association with daoohr30
+
+-   the effect of treatment group is not that significant
+
+-   the intercept shows high significance: could it be that there is much variance in the response variable to be explained by other covariates?
+
+-   adj R-squared is relatively small, the model is not fitted well
+
+There seems no specific pattern in the residual vs fitted value plot, suggesting equal variance; however, the mean model may not be correct. qq-plot displays a departure from normality.
+
+### Estimation result and Interpretation
+
+The coefficient for treatgroupSSU is 1.332, which means given other covariates, subjects in the SSU treatment group are expected to have 1.337 more DAOOH than subjects in the Hospitalization group.
+
+### pooled result
+
+```{r}
+dt.fit.linear <- with(dt.long.mids,
+               lm(daoohr30 ~ hosp6mo+sbp+bun+troponinilow2+bnpval+treatgroup))
+
+dt.pooled.linear <- pool(dt.fit.linear)
+linear_pool_result <- summary(dt.pooled.linear)
+linear_pool_result
+```
+
+### Diagnostic plots for linear regression
+
+```{r}
+fitted <- fitted(model.linear)
+residuals <- residuals(model.linear)
+plot_data <- data.frame(fitted = fitted, residuals = residuals)
+
+# residuals vs fitted value
+res.p1 <- ggplot(plot_data, aes(x = fitted, y = residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "(a)", x = "Fitted Values", y = "Residuals")+
+  theme(plot.title = element_text(size = 6, hjust = 0.5))
+
+# QQ-plot
+qq.p1 <- ggplot(plot_data, aes(sample = residuals)) +
+  geom_qq() +
+  geom_qq_line() +
+  labs(title = "(a)")+
+  theme(plot.title = element_text(size = 6, hjust = 0.5))
+
+res.p1
+qq.p1
+```
+
+### g-computation-pooled result
+
+```{r}
+m <- 15
+g_m <- numeric(m)  # store g-computation result
+pool_model <- dt.fit.linear
+
+# for each model, make prediction based on the each dataset and calculate ATE
+for (i in 1:m) {
+  dt.i <- complete(dt.imp,i)
+  dt.i0 <- cbind(dt.i[,c('hosp6mo','sbp','bun', 'troponinilow2','bnpval')], treatgroup = rep('Hospitalization', nrow(dt.i)))
+  predicted.i0 <- predict(pool_model$analyses[[i]],dt.i0)
+  
+  predicted.i0[predicted.i0 <0] <- 0
+  predicted.i0[predicted.i0 >30] <- 30
+  
+  
+  dt.i1 <- cbind(dt.i[,c('hosp6mo','sbp','bun', 'troponinilow2','bnpval')], treatgroup = rep('SSU', nrow(dt.i)))
+  predicted.i1 <- predict(pool_model$analyses[[i]],dt.i1)
+  
+  predicted.i1[predicted.i1 <0] <- 0
+  predicted.i1[predicted.i1 >30] <- 30
+  
+  g_m[i] <- mean(predicted.i1 - predicted.i0) # this is for linear regression
+}
+
+mean(g_m)
+```
+
+## Gamma Regression
+
+```{r}
+dt2$ndaoohr30 <- 30 - dt2$daoohr30
+model.gamma <- glm(ndaoohr30 ~ hosp6mo+sbp+bun+troponinilow2+bnpval+treatgroup, data = dt2, family = Gamma(link = "log"))
+summary(model.gamma)
+```
+### Diagnostic plots
+
+Steps： 1.Simulate new response data from the fitted model for each observation.
+
+2.For each observation, calculate the empirical cumulative density function for the simulated observations, which describes the possible values (and their probability) at the predictor combination of the observed value, assuming the fitted model is correct.
+
+3.The residual is then defined as the value of the empirical density function at the value of the observed data, so a residual of 0 means that all simulated values are larger than the observed value, and a residual of 0.5 means half of the simulated values are larger than the observed value.
+
+```{r}
+simulationOutput <- simulateResiduals(fittedModel = model.gamma, plot = F)
+# residuals(simulationOutput)
+```
+
+```{r}
+plot(simulationOutput)
+```
+
+'containing the simulations and the scaled residuals, which can later be passed on to all other plots and test functions.' - can take out residuals
+
+For a correctly specified model we would expect asymptotically a uniform distribution of the scaled residuals & uniformity in y direction if we plot against any predictor.
+
+```{r}
+res <- simulationOutput$scaledResiduals
+
+fitted <- simulationOutput$fittedPredictedResponse # same as fitted(model.gamma)
+plot_data <- data.frame(fitted = fitted, residuals = res)
+
+
+# library(grid)
+# library(gridGraphics)
+plotResiduals(simulationOutput)
+
+qq.p2 <- ggplot(plot_data, aes(sample = residuals)) +
+  geom_qq(distribution = function(p) qunif(p, min = 0, max = 1)) +
+  geom_abline(slope = 1, intercept = 0,  linetype = "dashed") +
+  labs(title = "(b)")+
+  theme(plot.title = element_text(size = 6, hjust = 0.5))
+qq.p2
+
+plotQQunif(simulationOutput)
+
+
+```
+
+```{r}
+png("dharma_base.png", width=480, height=480, res=100)
+
+plotResiduals(simulationOutput,rank = T, main = "",quantreg = FALSE)
+# a smooth spline around the mean
+
+dev.off()
+
+plotResiduals(simulationOutput,rank = T, main = "",quantreg = FALSE)
+```
+
+```{r}
+plot_data <- plot_data[order(plot_data$fitted), ]
+plot_data$rank_fitted <- rank(plot_data$fitted, ties.method = "average") / (nrow(plot_data) + 1)
+
+
+res.p2 <- ggplot(plot_data, aes(x = rank_fitted, y = residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  labs(title = "(b)", x = "Rank Transformed Fitted Values", y = "Residuals")+
+  theme(plot.title = element_text(size = 6, hjust = 0.5))
+res.p2
+```
+
+### Estimation and Interpretation
+
+The model is:
+
+$$
+log(ndaoohr30)= \beta_0 + \beta_1hosp6mo+\beta_2sbp+\beta_3bun+\beta_4troponinilow2+\beta_5bnpval+\beta_6treatgroup
+$$
+
+The coefficient for treatgroupSSU is -0.2205, which means given other covariates, subjects in the SSU treatment group are expected to have a change in ndaoohr30 of exp(-0.2205×1) = 0.802 times compared to subjects in the Hospitalization group.(within the context of truncated sample)
+
+### pooled result
+
+```{r}
+dt.fit.gamma <- with(dt.long.mids,
+               glm(ndaoohr30 ~ hosp6mo+sbp+bun+troponinilow2+bnpval+treatgroup, family = Gamma(link = "log")))
+
+dt.pooled.gamma <- pool(dt.fit.gamma)
+gamma_pool_result <- summary(dt.pooled.gamma)
+gamma_pool_result
+```
+
+### g-computation-pooled result
+
+```{r}
+m <- 15
+g_m <- numeric(m)  # store g-computation result
+pool_model <- dt.fit.gamma
+
+# for each model, make prediction based on the each dataset and calculate ATE
+for (i in 1:m) {
+  dt.i <- complete(dt.imp,i)
+  dt.i0 <- cbind(dt.i[,c('hosp6mo','sbp','bun', 'troponinilow2','bnpval')], treatgroup = rep('Hospitalization', nrow(dt.i)))
+  predicted.i0 <- predict(pool_model$analyses[[i]],dt.i0)
+  
+  predicted.i0[predicted.i0 > log(30)] <- log(30)
+  
+  dt.i1 <- cbind(dt.i[,c('hosp6mo','sbp','bun', 'troponinilow2','bnpval')], treatgroup = rep('SSU', nrow(dt.i)))
+  predicted.i1 <- predict(pool_model$analyses[[i]],dt.i1)
+  
+  predicted.i1[predicted.i1 > log(30)] <- log(30)
+  
+  g_m[i] <- mean(30 - exp(predicted.i1) - (30 - exp(predicted.i0))) # this is for gamma regression, should first exponentiate and then 30 - to get the daoohr30
+}
+
+mean(g_m)
+```
+
+## Ordinal Regression (RMS package)
+
+```{r}
+library(rms)
+```
+
+reference: https://cran.r-project.org/web/packages/rms/rms.pdf
+
+```{r}
+hosp6mo <- dt2$hosp6mo; bun <- dt2$bun; troponinilow2 <- dt2$troponinilow2; bnpval <- dt2$bnpval; treatgroup <- dt2$treatgroup; sbp <- dt2$sbp; daoohr30 <- dt2$daoohr30
+
+ddist <- datadist(hosp6mo, bun, troponinilow2, bnpval, treatgroup, sbp,daoohr30)
+options(datadist = ddist)
+
+model.ord.r <- orm(daoohr30 ~ hosp6mo+bun+troponinilow2+bnpval+treatgroup+sbp, x = TRUE, y = TRUE)
+
+summary(model.ord.r)
+```
+
+```{r}
+predict(model.ord.r,type = 'mean')
+# the estimated mean Y by summing values of Y multiplied by the estimated Prob(Y= j).
+```
+
+### Diagnostic plots
+
+```{r}
+fitted <- predict(model.ord.r,type = 'mean')
+```
+
+```{r}
+# PResiduals
+# https://cran.r-project.org/src/contrib/Archive/PResiduals/?C=M;O=A
+# install.packages("PResiduals_1.0-1.tar", repos = NULL, type = "source")
+```
+
+```{r}
+library("PResiduals")
+```
+
+```{r}
+# Residual-by-predictor plots with PSRs from proportional odds model
+PSR.orm <- presid(model.ord.r)
+
+plot(fitted, PSR.orm, 
+               xlab = "The Fitted Value", ylab = "PSRs", 
+               col = gray(.6),
+               main = "Residual-by-Fitted Plot", 
+               cex = 0.3, cex.main = 0.8)
+lines(lowess(fitted, PSR.orm), lwd = 3)
+abline(h = 0, lty = 2)
+
+
+# residuals vs fitted value
+plot_data <- data.frame(fitted = fitted, residuals = PSR.orm)
+
+res.p3 <- ggplot(plot_data, aes(x = fitted, y = residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "(c)", x = "Fitted Values", y = "Residuals")+
+  theme(plot.title = element_text(size = 6, hjust = 0.5))
+res.p3
+
+```
+
+F(Y) is the probability integral transformation and it is uniformly distributed from 0 to 1. Therefore, if the PSR is from the properly-specified model, it is a re-scaling of the probability integral transformation and it is approximately uniformly distributed from−1 to 1 with expectation 0 and constant variance 1/3. A quantile-quantile (QQ) plot of PSRs versus the theoretical quantiles of the uniform distribution can be used to assess the overall model fit.
+
+```{r}
+# QQ-plot
+qqplot(qunif(ppoints(length(PSR.orm)), -1, 1), PSR.orm, 
+  main = " QQ-plots of probability-scale residuals (PSRs)", cex = 0.4, xlab = "Quantiles of Uniform Distribution",
+  ylab = "Quantiles of PSRs") 
+abline(a = 0, b = 1, lty = 2)
+grid()
+
+qq.p3 <- ggplot(plot_data, aes(sample = PSR.orm)) +
+  geom_qq(distribution = function(p) qunif(p, min = -1, max = 1)) +
+  geom_abline(slope = 1, intercept = 0,  linetype = "dashed") +
+  labs(title = "(c)")+
+  theme(plot.title = element_text(size = 6, hjust = 0.5))
+qq.p3
+
+```
+
+### pooled result
+
+\*\*\* compare aregImpute and mice: https://stats.stackexchange.com/questions/295977/how-to-use-restricted-cubic-splines-with-the-r-mice-imputation-package
+
+Like mice, aregImpute uses chained equations. Unlike mice, it uses bootstrap draws instead of approximate (assuming multivariate normality) Bayesian posterior draws.
+
+```{r}
+im <- aregImpute(~ daoohr30+hosp6mo+bun+troponinilow2+bnpval+treatgroup+sbp, 
+                 data = dt.im,
+                 n.impute = 15)
+dt.pooled.orm <- fit.mult.impute(daoohr30~ hosp6mo+bun+troponinilow2+bnpval+treatgroup+sbp , xtrans = im, data = dt.im, fitter = orm)
+orm_pool_result <- summary(dt.pooled.orm)
+orm_pool_result
+```
+
+### mice + polr result
+
+```{r}
+# mice + polr
+dt.fit.ord <- with(dt.long.mids,
+               polr(daoohr30.r~ hosp6mo+bun+troponinilow2+bnpval+treatgroup+sbp, Hess=TRUE))
+
+dt.pooled.ord <- pool(dt.fit.ord)
+ord_pool_result <- summary(dt.pooled.ord)
+ord_pool_result
+```
+
+### g-computation pooled result
+
+```{r}
+m <- 15
+g_m <- numeric(m)  
+
+
+# for each model, make prediction based on the each dataset and calculate ATE
+for (i in 1:m) {
+  dt.i <- impute.transcan(im, data=dt.im, imputation=i, list.out=TRUE, pr=FALSE, check=FALSE)
+
+# convert the list to the database
+  dt.i <- as.data.frame(dt.i, stringsAsFactors = FALSE)
+  ddist <- datadist(dt.i)
+  options(datadist = ddist)
+  
+  model.i <- orm(daoohr30~ hosp6mo+bun+troponinilow2+bnpval+treatgroup+sbp, x = TRUE, y = TRUE, data = dt.i)
+  
+  dt.i0 <- cbind(dt.i[,c('hosp6mo','sbp','bun', 'troponinilow2','bnpval')], treatgroup = rep('Hospitalization', nrow(dt.i)))
+  
+  predicted.i0 <- predict(model.i,dt.i0,type = 'mean')
+  
+  dt.i1 <- cbind(dt.i[,c('hosp6mo','sbp','bun', 'troponinilow2','bnpval')], treatgroup = rep('SSU', nrow(dt.i)))
+  predicted.i1 <- predict(model.i,dt.i1,type = 'mean')
+  
+  
+  g_m[i] <- mean(predicted.i1 - predicted.i0) 
+}
+
+mean(g_m)
+```
+
+## Probabilistic Index Model
+
+reference: 1. https://cran.r-project.org/web/packages/pim/vignettes/pim.pdf 2. De Schryver M, De Neve J. A tutorial on probabilistic index models: Regression models for the effect size P(Y1 \< Y2). Psychol Methods. 2019 Aug;24(4):403-418. doi: 10.1037/met0000194. Epub 2018 Sep 27. PMID: 30265047.(Wilcoxon–Mann–Whitney (WMW) test, t test, PIM)
+
+```{r}
+model.pim <- pim(daoohr30~ hosp6mo+bun+troponinilow2+bnpval+treatgroup+sbp, data = dt2)
+summary(model.pim)
+```
+
+### Estimation and Interpretation
+
+```{r}
+exp(model.pim@coef['treatgroupSSU'])/(1 + exp(model.pim@coef['treatgroupSSU']))
+```
+
+The expit coefficient for treatgroupSSU is 0.60, which means given other covariates, the probability that subjects in the SSU treatment group have a higher daoohr30 compared to subjects in the Hospitalization group is estimated by 0.60.
+
+### pooled result manually based on Rubin’s Rules
+
+```{r}
+pim_pool <- function(imp, formula, variable = "treatgroupSSU") {
+  m <- imp$m
+  q_m <- numeric(m)
+  u_m <- numeric(m)
+  
+  for (i in 1:m) {
+    dt.i <- complete(imp, i)
+    formula_obj <- as.formula(formula)
+    
+    model <- pim(formula_obj, data = dt.i)
+
+    coef <- model@coef[variable]
+    se <- summary(model)@se[variable]
+    
+    q_m[i] <- coef
+    u_m[i] <- se^2
+    
+  }
+  
+  # Rubin’s Rules pooling
+  Q_bar <- mean(q_m)
+  U_bar <- mean(u_m)
+  B <- var(q_m)
+  T_var <- U_bar + (1 + 1/m) * B
+  se_pooled <- sqrt(T_var)
+  t_value <- Q_bar / se_pooled
+  df <- (m - 1) * (1 + U_bar / ((1 + 1/m) * B))^2
+  p_value <- 2 * pt(-abs(t_value), df)
+  
+
+  result <- list(
+    estimate = Q_bar,
+    std.error = se_pooled,
+    t.value = t_value,
+    df = df,
+    p.value = p_value
+  )
+  
+  return(result)
+}
+
+```
+
+```{r}
+pim_pool_result <- pim_pool(imp  = dt.imp, formula = 'daoohr30~ hosp6mo+bun+troponinilow2+bnpval+treatgroup+sbp')
+pim_pool_result
+```
+
+### compare with WMW test
+
+```{r}
+# same p-val as Wilcoxon–Mann–Whitney test
+summary(pim(daoohr30~ treatgroup, data = dt2))
+```
+
+# G-computation CI
+
+```{r}
+#| echo: false
+#| results: hide
+library(Hmisc)
+library(ggplot2)
+library(rms)
+library(mice)
+library(boot)
+library(MASS)
+library(gt)
+```
+
+```{r}
+# set the seed
+set.seed(123)
+```
+
+## Functions
+
+```{r}
+bootstrap_data <- function(data) {
+  
+  n <- nrow(data)
+  boot_data <- data[sample(1:n, size = n, replace = TRUE), ]
+  
+  return(boot_data)
+  
+}
+
+glm_g_comp_one_sample_linear <- function(sample_imp_data, pool_model) {
+  
+  m <- m
+  g_m <- numeric(m)  # store g-computation result
+  
+  # for each model, make prediction based on the each dataset and calculate ATE
+  for (i in 1:m) {
+    dt.i <- complete(sample_imp_data,i)
+    dt.i0 <- cbind(dt.i[,c('hosp6mo','sbp','bun', 'troponinilow2','bnpval')], treatgroup = rep('Hospitalization', nrow(dt.i)))
+    predicted.i0 <- predict(pool_model$analyses[[i]],dt.i0)
+    
+    predicted.i0[predicted.i0 <0] <- 0
+    predicted.i0[predicted.i0 >30] <- 30
+    
+    dt.i1 <- cbind(dt.i[,c('hosp6mo','sbp','bun', 'troponinilow2','bnpval')], treatgroup = rep('SSU', nrow(dt.i)))
+    predicted.i1 <- predict(pool_model$analyses[[i]],dt.i1)
+    
+    predicted.i1[predicted.i1 <0] <- 0
+    predicted.i1[predicted.i1 >30] <- 30
+    
+    # check values
+    if (any(predicted.i0 < 0)) {
+      print('negative values')
+    } else if(any(predicted.i0 > 30)) {
+      print('>30 values')
+    } 
+    
+    if (any(predicted.i1 < 0)) {
+      print('negative values1')
+    } else if(any(predicted.i1 > 30)) {
+      print('>30 values1')
+    }
+    
+    g_m[i] <- mean(predicted.i1 - predicted.i0) # this is for linear regression
+  }
+  
+  return(g_m)
+  
+}
+
+glm_g_comp_one_sample_gamma <- function(sample_imp_data, pool_model) {
+  
+  m <- m
+  g_m <- numeric(m)  # store g-computation result
+  
+  # for each model, make prediction based on the each dataset and calculate ATE
+  for (i in 1:m) {
+    dt.i <- complete(sample_imp_data,i)
+    dt.i0 <- cbind(dt.i[,c('hosp6mo','sbp','bun', 'troponinilow2','bnpval')], treatgroup = rep('Hospitalization', nrow(dt.i)))
+    predicted.i0 <- predict(pool_model$analyses[[i]],dt.i0)
+    
+    predicted.i0[predicted.i0 > log(30)] <- log(30)
+    
+    dt.i1 <- cbind(dt.i[,c('hosp6mo','sbp','bun', 'troponinilow2','bnpval')], treatgroup = rep('SSU', nrow(dt.i)))
+    
+    predicted.i1 <- predict(pool_model$analyses[[i]],dt.i1)
+    
+    predicted.i1[predicted.i1 > log(30)] <- log(30)
+    
+    # check values
+    if (any(predicted.i0 > log(30))) {
+      print('>30 values')
+    }
+    
+    if (any(predicted.i1 > log(30))) {
+      print('>30 values1')
+    }
+    
+    
+    g_m[i] <- mean(30 - exp(predicted.i1) - (30 - exp(predicted.i0))) # this is for gamma regression, should first exponentiate and then 30 - to get the daoohr30
+  }
+  
+  return(g_m)
+  
+}
+
+glm_g_comp_one_sample_ordinal <- function(sample_imp_data, pool_model) {
+  
+  m <- m
+  g_m <- numeric(m)  # store g-computation result
+  
+  # for each model, make prediction based on the each dataset and calculate ATE
+  for (i in 1:m) {
+    dt.i <- impute.transcan(pool_model, data=sample_imp_data, imputation=i, list.out=TRUE, pr=FALSE, check=FALSE)
+
+  # convert the list to the database
+    dt.i <- as.data.frame(dt.i, stringsAsFactors = FALSE)
+    ddist <- datadist(dt.i)
+    options(datadist = ddist)
+    
+    model.i <- orm(daoohr30~ hosp6mo+bun+troponinilow2+bnpval+treatgroup+sbp, x = TRUE, y = TRUE, data = dt.i)
+    
+    dt.i0 <- cbind(dt.i[,c('hosp6mo','sbp','bun', 'troponinilow2','bnpval')], treatgroup = rep('Hospitalization', nrow(dt.i)))
+    
+    predicted.i0 <- predict(model.i,dt.i0,type = 'mean')
+    
+    dt.i1 <- cbind(dt.i[,c('hosp6mo','sbp','bun', 'troponinilow2','bnpval')], treatgroup = rep('SSU', nrow(dt.i)))
+    predicted.i1 <- predict(model.i,dt.i1,type = 'mean')
+    
+    
+    g_m[i] <- mean(predicted.i1 - predicted.i0)
+    
+  }
+  
+  return(g_m)
+  
+}
+
+
+# store the result of all bootstrap result (n times of bootstrap) at original scale
+g_comp_glm_result_linear <- function(n, m, family, data){
+  
+  result <- matrix(NA, nrow = n, ncol = m) #store the original scale result
+  
+  for (j in 1:n) {
+    # bootstrap
+    sample_data <- bootstrap_data(data)
+    
+    # multiple imputation
+    suppressMessages(suppressWarnings(
+      invisible(capture.output({
+        sample_imp_data <- mice(sample_data, m = m, quiet = TRUE)
+        }))
+      ))
+    
+    sample_imp_long <- complete(sample_imp_data, action="long", include = TRUE)
+    sample_imp_long$daoohr30 <- sample_data$daoohr30
+    sample.mids <- as.mids(sample_imp_long)
+    
+    # fit the model
+    pool_model <- with(sample.mids,
+                       glm(formula = daoohr30 ~ hosp6mo+sbp+bun+troponinilow2+bnpval+treatgroup,
+                           family = family))
+    result[j, ] <- glm_g_comp_one_sample_linear(sample_imp_data,pool_model)
+    
+  }
+  
+  result_df <- as.data.frame(result)
+  effect_of_interest <- rowMeans(result, na.rm = TRUE)
+  
+  return(effect_of_interest)
+  
+}
+
+
+g_comp_glm_result_gamma <- function(n, m, family, data){
+  
+  result <- matrix(NA, nrow = n, ncol = m) #store the original scale result
+  
+  for (j in 1:n) {
+    # bootstrap
+    sample_data <- bootstrap_data(data)
+    
+    # multiple imputation
+    suppressMessages(suppressWarnings(
+      invisible(capture.output({
+        sample_imp_data <- mice(sample_data, m = m, quiet = TRUE)
+        }))
+      ))
+    
+    sample_imp_long <- complete(sample_imp_data, action="long", include = TRUE)
+    sample_imp_long$ndaoohr30 <- 30-sample_data$daoohr30
+    sample.mids <- as.mids(sample_imp_long)
+    
+    # fit the model
+    pool_model <- with(sample.mids,
+                       glm(formula = ndaoohr30 ~ hosp6mo+sbp+bun+troponinilow2+bnpval+treatgroup,
+                           family = family))
+    result[j, ] <- glm_g_comp_one_sample_gamma(sample_imp_data,pool_model)
+    
+  }
+  
+  result_df <- as.data.frame(result)
+  effect_of_interest <- rowMeans(result, na.rm = TRUE)
+  
+  return(effect_of_interest)
+  
+} # get an n row vector here, in daoohr30 scale
+
+g_comp_glm_result_ordinal <- function(n, m, data){
+  
+  result <- matrix(NA, nrow = n, ncol = m) #store the original scale result
+  
+  for (j in 1:n) {
+    # bootstrap
+    sample_data <- bootstrap_data(data)
+    
+    # multiple imputation
+    suppressMessages(suppressWarnings(
+      invisible(capture.output({
+        im <- aregImpute(~ daoohr30+hosp6mo+bun+troponinilow2+bnpval+treatgroup+sbp,
+                     n.impute=m,
+                     data = sample_data)
+        }))
+      ))
+    
+    
+    result[j, ] <- glm_g_comp_one_sample_ordinal(sample_imp_data = sample_data,pool_model=im)
+    
+  }
+  
+  result_df <- as.data.frame(result)
+  effect_of_interest <- rowMeans(result, na.rm = TRUE)
+  
+  return(effect_of_interest)
+  
+}
+
+```
+
+## Arguments
+
+```{r}
+m = 15
+n = 500
+```
+
+## Prepare for Data
+
+```{r}
+# new analysis data
+dt2 <- read.csv('analytic_data.csv')
+
+# transform data
+dt2$daooh30 <- as.numeric(dt2$daooh30)
+dt2$daoohr30 <- as.numeric(dt2$daoohr30)
+dt2$daooh90 <- as.numeric(dt2$daooh90)
+dt2$daoohr90 <- as.numeric(dt2$daoohr90)
+
+dt2$hosp6mo <- as.factor(dt2$hosp6mo)
+dt2$troponinilow2 <- as.factor(dt2$troponinilow2)
+```
+
+```{r}
+# remove subjects whose daoohr are all NA values
+dt2 <- dt2[!(is.na(dt2$daoohr30) & is.na(dt2$daoohr90)),]
+
+# leave out the id variable
+dt2 <- dt2[,c('hosp6mo','sbp','bun', 'troponinilow2','bnpval','treatgroup','daoohr30')]
+```
+
+## CI calculation for linear regression
+
+```{r}
+# n, m, family, formula, data
+
+linear_result <- g_comp_glm_result_linear(n = n,
+                                          m = m,
+                                          family = gaussian(link = "identity"), 
+                                          data = dt2)
+
+g_comp_linear <- quantile(linear_result,c(0.025,0.5,0.975))
+g_comp_linear
+```
+
+## CI calculation for gamma regression
+
+```{r}
+# n, m, family, formula, data
+gamma_result <- g_comp_glm_result_gamma(n = n,
+                                        m = m,
+                                        family = Gamma(link = "log"), 
+                                        data = dt2)
+
+g_comp_gamma <- quantile(gamma_result,c(0.025,0.5,0.975))
+g_comp_gamma
+```
+
+## CI calculation for ordinal regression
+
+```{r}
+# n, m, family, formula, data
+
+ordinal_result <- g_comp_glm_result_ordinal(n = n,
+                                  m = m, 
+                                  data = dt2)
+
+g_comp_ord <- quantile(ordinal_result,c(0.025,0.5,0.975))
+g_comp_ord
+```
+
+# Summary table for result
+
+how the plot will look like: model,estimand, estimate, CI and p value
+
+separate the mean model and multiplicative model by blank space
+
+mean model: ?t-test; linear regression; probabilistic model
+
+multiplicative model: gamma regresison; ordinal regression; ?WMW test; pim model;
+
+## Result Table 1: estimates, CI, p-val, estimand
+
+```{r}
+# collect the estimates
+
+trt30r.estimate <- c(NA,
+                     t.estimate,
+                     linear_pool_result[7,'estimate'], # result of treatgroupSSU
+                     NA,
+                     NA,
+                     exp(gamma_pool_result[7,'estimate']),
+                     exp(orm_pool_result['treatgroup - SSU:Hospitalization','Effect']),
+                     NA,
+                     NA,
+                     exp(wmw.estimate)/(1 + exp(wmw.estimate)),
+                     exp(pim_pool_result$estimate)/(1 + exp(pim_pool_result$estimate))
+                     )
+
+trt30r.estimand <- c(NA,
+                     'Mean',
+                     'Mean',
+                     NA,
+                     NA,
+                     'Geometreic Mean',
+                     'Odds Ratio',
+                     NA,
+                     NA,
+                     'Probabilistic Index',
+                     'Probabilistic Index'
+                     )
+
+trt30r.lw <- c(NA,
+               t.ci.lw,
+               linear_pool_result[7,'estimate']-1.96*linear_pool_result[7,'std.error'],
+               NA,
+               NA,
+               exp(gamma_pool_result[7,'estimate']-1.96*gamma_pool_result[7,'std.error']),
+               exp(orm_pool_result['treatgroup - SSU:Hospitalization','Lower 0.95']),
+               NA,
+               NA,
+               wmw.ci.lw,
+               exp(pim_pool_result$estimate-1.96*pim_pool_result$std.error)/(1+exp(pim_pool_result$estimate-1.96*pim_pool_result$std.error))
+               )
+
+trt30r.up <- c(NA,
+               t.ci.up,
+               linear_pool_result[7,'estimate']+1.96*linear_pool_result[7,'std.error'],
+               NA,
+               NA,
+               exp(gamma_pool_result[7,'estimate']+1.96*gamma_pool_result[7,'std.error']),
+               exp(orm_pool_result['treatgroup - SSU:Hospitalization','Upper 0.95']),
+               NA,
+               NA,
+               wmw.ci.up,
+               exp(pim_pool_result$estimate+1.96*pim_pool_result$std.error)/(1+exp(pim_pool_result$estimate+1.96*pim_pool_result$std.error))
+               )
+
+# p_val for ordinal regression
+L <- orm_pool_result['treatgroup - SSU:Hospitalization','Lower 0.95']
+U <- orm_pool_result['treatgroup - SSU:Hospitalization','Upper 0.95']
+SE <- orm_pool_result['treatgroup - SSU:Hospitalization','S.E.']
+Est <- orm_pool_result['treatgroup - SSU:Hospitalization','Effect']
+z <- Est/SE
+ord_p_val <- 2 * (1 - pnorm(abs(z)))
+
+
+trt30r.pval <- c(NA,
+                 t.pval,
+                 linear_pool_result[7,'p.value'],
+                 NA,
+                 NA,
+                 gamma_pool_result[7,'p.value'],
+                 ord_p_val, # use the formula
+                 NA,
+                 NA,
+                 wmw.p.val,
+                 pim_pool_result$p.value
+                 )
+
+
+trt30r.label <- c("Additive Model","T-test","Linear",'',
+                  "Multiplicative Model","Gamma","Ordinal",'',
+                  "Probabilistic Model","WMW-test","PIM")
+
+# prepare the dataframe for plot
+(dt.trt30r <- data.frame(subgroup = trt30r.label,
+                         estimate = round(trt30r.estimate,3),
+                         estimand = trt30r.estimand,
+                         ci.low = round(trt30r.lw,3),
+                         ci.up = round(trt30r.up,3),
+                         pval = round(trt30r.pval,3)))
+```
+
+```{r}
+# add the blank column to display CI
+
+dt.trt30r$" " <- paste(rep(" ", 20), collapse = " ")
+
+# Create a confidence interval column to display
+dt.trt30r$`95% CI` <- ifelse((is.na(dt.trt30r$ci.low)), "",
+                             sprintf("(%.2f to %.2f)",
+                                     dt.trt30r$ci.low, dt.trt30r$ci.up))
+
+dt.trt30r$estimate <- ifelse(is.na(dt.trt30r$estimate),"",dt.trt30r$estimate)
+dt.trt30r$ci.low <- ifelse(is.na(dt.trt30r$ci.low),"",dt.trt30r$ci.low)
+dt.trt30r$ci.up <- ifelse(is.na(dt.trt30r$ci.up),"",dt.trt30r$ci.up)
+dt.trt30r$pval <- ifelse(is.na(dt.trt30r$pval),"",dt.trt30r$pval)
+dt.trt30r$estimand <- ifelse(is.na(dt.trt30r$estimand),"",dt.trt30r$estimand)
+
+dt.trt30r$subgroup <- ifelse(is.na(dt.trt30r$estimate), dt.trt30r$subgroup,paste0("   ", dt.trt30r$subgroup))
+dt.trt30r[c('subgroup','estimate','estimand','pval','95% CI')]
+```
+
+```{r}
+dt.trt30r[c('subgroup','estimate','estimand','pval','95% CI')] %>%
+  gt() %>%
+  tab_header(title = "Table 1") %>%
+  fmt_number(columns = c("pval"), decimals = 2) %>%
+  cols_label(
+    subgroup = "Subgroup",
+    estimate = "Estimate",
+    estimand = "Estimand",
+    pval = "P-value",
+    '95% CI' = "95%CI"
+  ) %>%
+  tab_style(
+    style = list(cell_text(weight = "bold")),
+    locations = cells_body(
+      rows = subgroup %in% c("Additive Model", "Multiplicative Model"),
+      columns = everything()
+    )
+  )
+```
+
+
+## Result Table 2: g-computation result: linear, gamma, ord
+
+```{r}
+# collect the estimates
+
+g.comp.estimate <- c(NA,
+                     g_comp_linear[2],
+                     NA,
+                     NA,
+                     g_comp_gamma[2],
+                     g_comp_ord[2]
+                     )
+
+
+g.comp.lw <- c(NA,
+               g_comp_linear[1],
+               NA,
+               NA,
+               g_comp_gamma[1],
+               g_comp_ord[1]
+               )
+
+g.comp.up <- c(NA,
+               g_comp_linear[3],
+               NA,
+               NA,
+               g_comp_gamma[3],
+               g_comp_ord[3]
+               )
+
+
+
+g.comp.label <- c("Additive Model","Linear",'',
+                  "Multiplicative Model","Gamma","Ordinal")
+
+# prepare the dataframe for plot
+(dt.g.comp <- data.frame(subgroup = g.comp.label,
+                         estimate = round(g.comp.estimate,3),
+                         ci.low = round(g.comp.lw,3),
+                         ci.up = round(g.comp.up,3)))
+```
+
+```{r}
+
+dt.g.comp$" " <- paste(rep(" ", 20), collapse = " ")
+
+# Create a confidence interval column to display
+dt.g.comp$`95% CI` <- ifelse((is.na(dt.g.comp$ci.low)), "",
+                             sprintf("(%.2f to %.2f)",
+                                     dt.g.comp$ci.low, dt.g.comp$ci.up))
+
+dt.g.comp$estimate <- ifelse(is.na(dt.g.comp$estimate),"",dt.g.comp$estimate)
+
+dt.g.comp$subgroup <- ifelse(is.na(dt.g.comp$estimate), dt.g.comp$subgroup,paste0("   ", dt.g.comp$subgroup))
+dt.g.comp[c('subgroup','estimate','95% CI')]
+```
+
+```{r}
+dt.g.comp[c('subgroup','estimate','95% CI')] %>%
+  gt() %>%
+  tab_header(title = "Table 2") %>%
+  cols_label(
+    subgroup = "Subgroup",
+    estimate = "Estimate",
+    '95% CI' = "95%CI"
+  ) %>%
+  tab_style(
+    style = list(cell_text(weight = "bold")),
+    locations = cells_body(
+      rows = subgroup %in% c("Additive Model", "Multiplicative Model"),
+      columns = everything()
+    )
+  )
+```
+
+## Diagnostic Plots
+
+```{r}
+res.p1.n <- res.p1 + labs(y = 'Residuals',x = 'DAOOH') + theme_bw()+
+  theme(plot.title = element_text(size = 8, hjust = 0.5))
+res.p2.n <- res.p2 + labs(y = 'Residuals',x = 'DAOOH(Rank transformed)') + theme_bw()+
+  theme(plot.title = element_text(size = 8, hjust = 0.5))
+res.p3.n <- res.p3 + labs(y = 'PResiduals',x = 'DAOOH') + theme_bw()+
+  theme(plot.title = element_text(size = 8, hjust = 0.5))
+
+res.plot <- ggarrange(res.p1.n, res.p2.n,res.p3.n,
+                       ncol = 3, nrow = 1,
+                       align = "hv",
+                       widths = c(1, 1),
+                       common.legend = FALSE)
+res.plot <- annotate_figure(res.plot)
+res.plot
+ggsave("res.plot.png", plot = res.plot, width = 10, height = 3, dpi = 300)
+```
+
+```{r}
+res.p1.n <- res.p1 + labs(y = NULL, x = 'Quantiles of Normal Distribution') + theme_bw()+
+  theme(plot.title = element_text(size = 8, hjust = 0.5), axis.title.x = element_text(size = 6))
+res.p2.n <- res.p2 + labs(y = NULL, x = 'Quantiles of Normal Distribution') + theme_bw()+
+  theme(plot.title = element_text(size = 8, hjust = 0.5), axis.title.x = element_text(size = 6))
+res.p3.n <- res.p3 + labs(y = NULL, x = 'Quantiles of Uniform Distribution') + theme_bw()+
+  theme(plot.title = element_text(size = 8, hjust = 0.5), axis.title.x = element_text(size = 6))
+
+res.plot <- ggarrange(res.p1.n, res.p2.n,res.p3.n,
+                       ncol = 1, nrow = 3,
+                       align = "hv",
+                       widths = c(1, 1),
+                       common.legend = FALSE)
+res.plot <- annotate_figure(res.plot)
+res.plot
+
+ggsave("res.plot_v.png", res.plot, width = 10, height = 3, dpi = 300)
+```
+
+```{r}
+qq.p1.n <- qq.p1 + labs(y = NULL, x = 'Quantiles of Normal Distribution') + theme_bw()+
+  theme(plot.title = element_text(size = 8, hjust = 0.5))
+qq.p2.n <- qq.p2 + labs(y = NULL, x = 'Quantiles of Uniform Distribution') + theme_bw()+
+  theme(plot.title = element_text(size = 8, hjust = 0.5))
+qq.p3.n <- qq.p3 + labs(y = NULL, x = 'Quantiles of Uniform Distribution') + theme_bw()+
+  theme(plot.title = element_text(size = 8, hjust = 0.5))
+qq.plot <- ggarrange(qq.p1.n, qq.p2.n,qq.p3.n,
+                       ncol = 3, nrow = 1,
+                       align = "hv",
+                       widths = c(1, 1),
+                       common.legend = FALSE)
+qq.plot <- annotate_figure(qq.plot,
+                         left   = text_grob("Sample Quantiles", rot = 90, size = 10),
+                         bottom = text_grob("Theoretical Quantiles", size = 10))
+qq.plot
+ggsave("qq.plot.png", plot = qq.plot, width = 10, height = 3, dpi = 600)
+```
