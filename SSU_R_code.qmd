@@ -5,7 +5,7 @@ editor: visual
 ---
 
 ```{r}
-set.seed(123)
+# set.seed(123)
 ```
 
 ```{r}
