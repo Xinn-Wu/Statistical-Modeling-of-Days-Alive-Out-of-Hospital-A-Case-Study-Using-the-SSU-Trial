@@ -1,4 +1,4 @@
-# DAOOH Paper
+# DAOOH Manuscript — Code
 
 This repository contains the analysis code for the manuscript:
 
