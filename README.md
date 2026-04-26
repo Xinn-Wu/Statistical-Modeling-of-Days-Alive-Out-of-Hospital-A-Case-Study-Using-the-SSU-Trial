@@ -6,6 +6,9 @@ This repository contains the analysis code for the manuscript:
 
 The main outcome is **Days Alive and Out-of-Hospital (DAOOH)** (a type of **Hospital-Free Days** outcome), and this repository provides scripts to reproduce the analyses, tables, and figures reported in the manuscript.
 
+
+The analysis was conducted using:
+
 - R version: 4.4.2
 - Operating system: macOS Sequoia 15.7.4
 
